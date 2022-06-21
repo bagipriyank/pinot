@@ -1430,7 +1430,7 @@
         <plugin>
           <groupId>com.mycila</groupId>
           <artifactId>license-maven-plugin</artifactId>
-          <version>4.0</version>
+          <version>4.1</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -1618,7 +1618,7 @@
       <plugin>
         <groupId>com.mycila</groupId>
         <artifactId>license-maven-plugin</artifactId>
-        <version>4.0</version>
+        <version>4.1</version>
         <configuration>
           <header>${pinot.root}/HEADER</header>
           <headerDefinitions>
