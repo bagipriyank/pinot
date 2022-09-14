@@ -18,10 +18,10 @@
  */
 package org.apache.pinot.query.parser;
 
-import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.ExpressionType;
@@ -53,8 +53,13 @@ public class CalciteRexExpressionParser {
   // Relational conversion Utils
   // --------------------------------------------------------------------------
 
-  public static List<Expression> convertSelectList(List<RexExpression> rexNodeList, PinotQuery pinotQuery) {
-    List<Expression> selectExpr = new ArrayList<>();
+  public static List<Expression> overwriteSelectList(List<RexExpression> rexNodeList, PinotQuery pinotQuery) {
+    return addSelectList(new ArrayList<>(), rexNodeList, pinotQuery);
+  }
+
+  public static List<Expression> addSelectList(List<Expression> existingList, List<RexExpression> rexNodeList,
+      PinotQuery pinotQuery) {
+    List<Expression> selectExpr = new ArrayList<>(existingList);
 
     final Iterator<RexExpression> iterator = rexNodeList.iterator();
     while (iterator.hasNext()) {
@@ -65,34 +70,43 @@ public class CalciteRexExpressionParser {
     return selectExpr;
   }
 
+  public static List<Expression> convertGroupByList(List<RexExpression> rexNodeList, PinotQuery pinotQuery) {
+    List<Expression> groupByExpr = new ArrayList<>();
+
+    final Iterator<RexExpression> iterator = rexNodeList.iterator();
+    while (iterator.hasNext()) {
+      final RexExpression next = iterator.next();
+      groupByExpr.add(toExpression(next, pinotQuery));
+    }
+
+    return groupByExpr;
+  }
+
   private static List<Expression> convertDistinctSelectList(RexExpression.FunctionCall rexCall, PinotQuery pinotQuery) {
     List<Expression> selectExpr = new ArrayList<>();
     selectExpr.add(convertDistinctAndSelectListToFunctionExpression(rexCall, pinotQuery));
     return selectExpr;
   }
 
-  private static List<Expression> convertOrderByList(RexExpression.FunctionCall rexCall, PinotQuery pinotQuery) {
-    Preconditions.checkState(rexCall.getKind() == SqlKind.ORDER_BY);
+  public static List<Expression> convertOrderByList(List<RexExpression> rexInputRefs,
+      List<RelFieldCollation.Direction> directions, PinotQuery pinotQuery) {
     List<Expression> orderByExpr = new ArrayList<>();
 
-    final Iterator<RexExpression> iterator = rexCall.getFunctionOperands().iterator();
-    while (iterator.hasNext()) {
-      final RexExpression next = iterator.next();
-      orderByExpr.add(convertOrderBy(next, pinotQuery));
+    for (int i = 0; i < rexInputRefs.size(); i++) {
+      orderByExpr.add(convertOrderBy(rexInputRefs.get(i), directions.get(i), pinotQuery));
     }
     return orderByExpr;
   }
 
-  private static Expression convertOrderBy(RexExpression rexNode, PinotQuery pinotQuery) {
-    final SqlKind kind = rexNode.getKind();
+  private static Expression convertOrderBy(RexExpression rexNode, RelFieldCollation.Direction direction,
+      PinotQuery pinotQuery) {
     Expression expression;
-    switch (kind) {
+    switch (direction) {
       case DESCENDING:
-        RexExpression.FunctionCall rexCall = (RexExpression.FunctionCall) rexNode;
         expression = RequestUtils.getFunctionExpression("DESC");
-        expression.getFunctionCall().addToOperands(toExpression(rexCall.getFunctionOperands().get(0), pinotQuery));
+        expression.getFunctionCall().addToOperands(toExpression(rexNode, pinotQuery));
         break;
-      case IDENTIFIER:
+      case ASCENDING:
       default:
         expression = RequestUtils.getFunctionExpression("ASC");
         expression.getFunctionCall().addToOperands(toExpression(rexNode, pinotQuery));
@@ -154,10 +168,9 @@ public class CalciteRexExpressionParser {
         return compileAndExpression(rexCall, pinotQuery);
       case OR:
         return compileOrExpression(rexCall, pinotQuery);
-      case COUNT:
-      case OTHER:
       case OTHER_FUNCTION:
-      case DOT:
+        functionName = rexCall.getFunctionName();
+        break;
       default:
         functionName = functionKind.name();
         break;
@@ -169,7 +182,7 @@ public class CalciteRexExpressionParser {
       operands.add(toExpression(childNode, pinotQuery));
     }
     ParserUtils.validateFunction(functionName, operands);
-    Expression functionExpression = RequestUtils.getFunctionExpression(functionName);
+    Expression functionExpression = RequestUtils.getFunctionExpression(canonicalizeFunctionName(functionName));
     functionExpression.getFunctionCall().setOperands(operands);
     return functionExpression;
   }
@@ -208,5 +221,16 @@ public class CalciteRexExpressionParser {
     Expression andExpression = RequestUtils.getFunctionExpression(SqlKind.OR.name());
     andExpression.getFunctionCall().setOperands(operands);
     return andExpression;
+  }
+
+  /**
+   * Canonicalize Calcite generated Logical function names.
+   */
+  private static String canonicalizeFunctionName(String functionName) {
+    if (functionName.endsWith("0")) {
+      return functionName.substring(0, functionName.length() - 1);
+    } else {
+      return functionName;
+    }
   }
 }

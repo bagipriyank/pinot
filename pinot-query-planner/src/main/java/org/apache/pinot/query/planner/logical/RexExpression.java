@@ -18,9 +18,11 @@
  */
 package org.apache.pinot.query.planner.logical;
 
+import com.google.common.base.Preconditions;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
@@ -29,6 +31,7 @@ import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.NlsString;
+import org.apache.pinot.common.utils.PinotDataType;
 import org.apache.pinot.query.planner.serde.ProtoProperties;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -55,25 +58,68 @@ public interface RexExpression {
       RexCall rexCall = (RexCall) rexNode;
       List<RexExpression> operands = rexCall.getOperands().stream().map(RexExpression::toRexExpression)
           .collect(Collectors.toList());
-      return new RexExpression.FunctionCall(rexCall.getKind(), toDataType(rexCall.getType()),
-          rexCall.getOperator().getName(), operands);
+      return toRexExpression(rexCall, operands);
     } else {
       throw new IllegalArgumentException("Unsupported RexNode type with SqlKind: " + rexNode.getKind());
     }
   }
 
+  static RexExpression toRexExpression(RexCall rexCall, List<RexExpression> operands) {
+    switch (rexCall.getKind()) {
+      case CAST:
+        // CAST is being rewritten into "rexCall.CAST<targetType>(inputValue)",
+        //   - e.g. result type has already been converted into the CAST RexCall, so we assert single operand.
+        Preconditions.checkState(operands.size() == 1, "CAST takes exactly 2 arguments");
+        RelDataType castType = rexCall.getType();
+        // add the 2nd argument as the source type info.
+        operands.add(new Literal(FieldSpec.DataType.STRING, rexCall.getOperands().get(0).getType().getSqlTypeName(),
+            toPinotDataType(rexCall.getOperands().get(0).getType()).name()));
+        return new RexExpression.FunctionCall(rexCall.getKind(), toDataType(rexCall.getType()), "CAST", operands);
+      default:
+        return new RexExpression.FunctionCall(rexCall.getKind(), toDataType(rexCall.getType()),
+            rexCall.getOperator().getName(), operands);
+    }
+  }
+
+  static PinotDataType toPinotDataType(RelDataType type) {
+    switch (type.getSqlTypeName()) {
+      case INTEGER:
+        return PinotDataType.INTEGER;
+      case BIGINT:
+        return PinotDataType.LONG;
+      case FLOAT:
+        return PinotDataType.FLOAT;
+      case DOUBLE:
+        return PinotDataType.DOUBLE;
+      case CHAR:
+      case VARCHAR:
+        return PinotDataType.STRING;
+      case BOOLEAN:
+        return PinotDataType.BOOLEAN;
+      default:
+        // TODO: do not assume byte type.
+        return PinotDataType.BYTES;
+    }
+  }
+
+  static RexExpression toRexExpression(AggregateCall aggCall) {
+    List<RexExpression> operands = aggCall.getArgList().stream().map(InputRef::new).collect(Collectors.toList());
+    return new RexExpression.FunctionCall(aggCall.getAggregation().getKind(), toDataType(aggCall.getType()),
+        aggCall.getAggregation().getName(), operands);
+  }
+
   static Object toRexValue(FieldSpec.DataType dataType, Comparable value) {
     switch (dataType) {
       case INT:
-        return ((BigDecimal) value).intValue();
+        return value == null ? 0 : ((BigDecimal) value).intValue();
       case LONG:
-        return ((BigDecimal) value).longValue();
+        return value == null ? 0L : ((BigDecimal) value).longValue();
       case FLOAT:
-        return ((BigDecimal) value).floatValue();
+        return value == null ? 0f : ((BigDecimal) value).floatValue();
       case DOUBLE:
-        return ((BigDecimal) value).doubleValue();
+        return value == null ? 0d : ((BigDecimal) value).doubleValue();
       case STRING:
-        return ((NlsString) value).getValue();
+        return value == null ? "" : ((NlsString) value).getValue();
       default:
         return value;
     }
@@ -89,6 +135,7 @@ public interface RexExpression {
         return FieldSpec.DataType.FLOAT;
       case DOUBLE:
         return FieldSpec.DataType.DOUBLE;
+      case CHAR:
       case VARCHAR:
         return FieldSpec.DataType.STRING;
       case BOOLEAN:

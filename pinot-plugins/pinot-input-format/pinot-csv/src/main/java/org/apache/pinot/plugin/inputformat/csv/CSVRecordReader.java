@@ -80,7 +80,7 @@ public class CSVRecordReader implements RecordReader {
         }
       }
       char delimiter = config.getDelimiter();
-      format = format.withDelimiter(delimiter);
+      format = format.withDelimiter(delimiter).withIgnoreSurroundingSpaces(true);
       String csvHeader = config.getHeader();
       if (csvHeader == null) {
         format = format.withHeader();
@@ -92,6 +92,11 @@ public class CSVRecordReader implements RecordReader {
       Character commentMarker = config.getCommentMarker();
       format = format.withCommentMarker(commentMarker);
       format = format.withEscape(config.getEscapeCharacter());
+      String nullString = config.getNullStringValue();
+      if (nullString != null) {
+        format = format.withNullString(nullString);
+      }
+
       _format = format;
       if (config.isMultiValueDelimiterEnabled()) {
         multiValueDelimiter = config.getMultiValueDelimiter();

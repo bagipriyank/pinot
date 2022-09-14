@@ -24,7 +24,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.apache.helix.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadataCustomMapModifier;
 import org.apache.pinot.common.minion.RealtimeToOfflineSegmentsTaskMetadata;
 import org.apache.pinot.core.common.MinionConstants;
@@ -59,7 +59,7 @@ import org.slf4j.LoggerFactory;
  * 5. Sort records if sorting is enabled in the table config
  *
  * Before beginning the task, the <code>watermarkMs</code> is checked in the minion task metadata ZNode,
- * located at MINION_TASK_METADATA/RealtimeToOfflineSegmentsTask/<tableNameWithType>
+ * located at MINION_TASK_METADATA/${tableNameWithType}/RealtimeToOfflineSegmentsTask
  * It should match the <code>windowStartMs</code>.
  * The version of the znode is cached.
  *

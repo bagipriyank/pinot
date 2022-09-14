@@ -62,6 +62,7 @@ public abstract class QueryScheduler {
   private static final String INVALID_NUM_RESIZES = "-1";
   private static final String INVALID_RESIZE_TIME_MS = "-1";
   private static final String QUERY_LOG_MAX_RATE_KEY = "query.log.maxRatePerSecond";
+  private static final String ENABLE_QUERY_CANCELLATION_KEY = "enable.query.cancellation";
   private static final double DEFAULT_QUERY_LOG_MAX_RATE = 10_000d;
   protected final ServerMetrics _serverMetrics;
   protected final QueryExecutor _queryExecutor;
@@ -71,7 +72,6 @@ public abstract class QueryScheduler {
   private final RateLimiter _numDroppedLogRateLimiter;
   private final AtomicInteger _numDroppedLogCounter;
   protected volatile boolean _isRunning = false;
-
   /**
    * Constructor to initialize QueryScheduler
    * @param queryExecutor QueryExecutor engine to use
@@ -93,7 +93,6 @@ public abstract class QueryScheduler {
     _queryLogRateLimiter = RateLimiter.create(config.getProperty(QUERY_LOG_MAX_RATE_KEY, DEFAULT_QUERY_LOG_MAX_RATE));
     _numDroppedLogRateLimiter = RateLimiter.create(1.0d);
     _numDroppedLogCounter = new AtomicInteger(0);
-
     LOGGER.info("Query log max rate: {}", _queryLogRateLimiter.getRate());
   }
 
@@ -175,8 +174,21 @@ public abstract class QueryScheduler {
         dataTableMetadata.getOrDefault(MetadataKey.NUM_SEGMENTS_PROCESSED.getName(), INVALID_SEGMENTS_COUNT));
     long numSegmentsMatched = Long.parseLong(
         dataTableMetadata.getOrDefault(MetadataKey.NUM_SEGMENTS_MATCHED.getName(), INVALID_SEGMENTS_COUNT));
+    long numSegmentsPrunedInvalid = Long.parseLong(
+        dataTableMetadata.getOrDefault(
+            MetadataKey.NUM_SEGMENTS_PRUNED_INVALID.getName(), INVALID_SEGMENTS_COUNT));
+    long numSegmentsPrunedByLimit = Long.parseLong(
+        dataTableMetadata.getOrDefault(
+            MetadataKey.NUM_SEGMENTS_PRUNED_BY_LIMIT.getName(), INVALID_SEGMENTS_COUNT));
+    long numSegmentsPrunedByValue = Long.parseLong(
+        dataTableMetadata.getOrDefault(
+            MetadataKey.NUM_SEGMENTS_PRUNED_BY_VALUE.getName(), INVALID_SEGMENTS_COUNT));
     long numSegmentsConsuming = Long.parseLong(
+        dataTableMetadata.getOrDefault(MetadataKey.NUM_CONSUMING_SEGMENTS_QUERIED.getName(), INVALID_SEGMENTS_COUNT));
+    long numConsumingSegmentsProcessed = Long.parseLong(
         dataTableMetadata.getOrDefault(MetadataKey.NUM_CONSUMING_SEGMENTS_PROCESSED.getName(), INVALID_SEGMENTS_COUNT));
+    long numConsumingSegmentsMatched = Long.parseLong(
+        dataTableMetadata.getOrDefault(MetadataKey.NUM_CONSUMING_SEGMENTS_MATCHED.getName(), INVALID_SEGMENTS_COUNT));
     long minConsumingFreshnessMs = Long.parseLong(
         dataTableMetadata.getOrDefault(MetadataKey.MIN_CONSUMING_FRESHNESS_TIME_MS.getName(), INVALID_FRESHNESS_MS));
     int numResizes =
@@ -231,12 +243,16 @@ public abstract class QueryScheduler {
 
     // Please keep the format as name=value comma-separated with no spaces
     // Please add new entries at the end
-    if (_queryLogRateLimiter.tryAcquire() || forceLog(schedulerWaitMs, numDocsScanned)) {
-      LOGGER.info("Processed requestId={},table={},segments(queried/processed/matched/consuming)={}/{}/{}/{},"
+    if (_queryLogRateLimiter.tryAcquire() || forceLog(schedulerWaitMs, numDocsScanned, numSegmentsPrunedInvalid)) {
+      LOGGER.info("Processed requestId={},table={},"
+              + "segments(queried/processed/matched/consumingQueried/consumingProcessed/consumingMatched/"
+              + "invalid/limit/value)={}/{}/{}/{}/{}/{}/{}/{}/{},"
               + "schedulerWaitMs={},reqDeserMs={},totalExecMs={},resSerMs={},totalTimeMs={},minConsumingFreshnessMs={},"
               + "broker={},numDocsScanned={},scanInFilter={},scanPostFilter={},sched={},"
               + "threadCpuTimeNs(total/thread/sysActivity/resSer)={}/{}/{}/{}", requestId, tableNameWithType,
-          numSegmentsQueried, numSegmentsProcessed, numSegmentsMatched, numSegmentsConsuming, schedulerWaitMs,
+          numSegmentsQueried, numSegmentsProcessed, numSegmentsMatched, numSegmentsConsuming,
+          numConsumingSegmentsProcessed, numConsumingSegmentsMatched,
+          numSegmentsPrunedInvalid, numSegmentsPrunedByLimit, numSegmentsPrunedByValue, schedulerWaitMs,
           timerContext.getPhaseDurationMs(ServerQueryPhase.REQUEST_DESERIALIZATION),
           timerContext.getPhaseDurationMs(ServerQueryPhase.QUERY_PROCESSING),
           timerContext.getPhaseDurationMs(ServerQueryPhase.RESPONSE_SERIALIZATION),
@@ -266,6 +282,12 @@ public abstract class QueryScheduler {
     _serverMetrics.addMeteredTableValue(tableNameWithType, ServerMeter.NUM_SEGMENTS_QUERIED, numSegmentsQueried);
     _serverMetrics.addMeteredTableValue(tableNameWithType, ServerMeter.NUM_SEGMENTS_PROCESSED, numSegmentsProcessed);
     _serverMetrics.addMeteredTableValue(tableNameWithType, ServerMeter.NUM_SEGMENTS_MATCHED, numSegmentsMatched);
+    _serverMetrics.addMeteredTableValue(tableNameWithType, ServerMeter.NUM_SEGMENTS_PRUNED_INVALID,
+        numSegmentsPrunedInvalid);
+    _serverMetrics.addMeteredTableValue(tableNameWithType, ServerMeter.NUM_SEGMENTS_PRUNED_BY_LIMIT,
+        numSegmentsPrunedByLimit);
+    _serverMetrics.addMeteredTableValue(tableNameWithType, ServerMeter.NUM_SEGMENTS_PRUNED_BY_VALUE,
+        numSegmentsPrunedByValue);
 
     return responseBytes;
   }
@@ -276,9 +298,14 @@ public abstract class QueryScheduler {
    * TODO: come up with other criteria for forcing a log and come up with better numbers
    *
    */
-  private boolean forceLog(long schedulerWaitMs, long numDocsScanned) {
+  private boolean forceLog(long schedulerWaitMs, long numDocsScanned, long numSegmentsPrunedInvalid) {
     // If scheduler wait time is larger than 100ms, force the log
     if (schedulerWaitMs > 100L) {
+      return true;
+    }
+
+    // If there are invalid segments, force the log
+    if (numSegmentsPrunedInvalid > 0) {
       return true;
     }
 

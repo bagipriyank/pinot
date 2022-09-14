@@ -23,20 +23,26 @@ import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.JoinInfo;
 import org.apache.calcite.rel.core.JoinRelType;
+import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalFilter;
 import org.apache.calcite.rel.logical.LogicalJoin;
 import org.apache.calcite.rel.logical.LogicalProject;
+import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.rel.type.RelRecordType;
 import org.apache.calcite.rex.RexCall;
-import org.apache.calcite.rex.RexInputRef;
-import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.query.planner.partitioning.FieldSelectionKeySelector;
+import org.apache.pinot.query.planner.stage.AggregateNode;
 import org.apache.pinot.query.planner.stage.FilterNode;
 import org.apache.pinot.query.planner.stage.JoinNode;
 import org.apache.pinot.query.planner.stage.ProjectNode;
+import org.apache.pinot.query.planner.stage.SortNode;
 import org.apache.pinot.query.planner.stage.StageNode;
 import org.apache.pinot.query.planner.stage.TableScanNode;
 
@@ -67,42 +73,98 @@ public final class RelToStageConverter {
       return convertLogicalProject((LogicalProject) node, currentStageId);
     } else if (node instanceof LogicalFilter) {
       return convertLogicalFilter((LogicalFilter) node, currentStageId);
+    } else if (node instanceof LogicalAggregate) {
+      return convertLogicalAggregate((LogicalAggregate) node, currentStageId);
+    } else if (node instanceof LogicalSort) {
+      return convertLogicalSort((LogicalSort) node, currentStageId);
     } else {
-      throw new UnsupportedOperationException("Unsupported logical plan node: " + node);
+        throw new UnsupportedOperationException("Unsupported logical plan node: " + node);
     }
   }
 
+  private static StageNode convertLogicalSort(LogicalSort node, int currentStageId) {
+    int fetch = node.fetch == null ? -1 : ((RexLiteral) node.fetch).getValueAs(Integer.class);
+    int offset = node.offset == null ? -1 : ((RexLiteral) node.offset).getValueAs(Integer.class);
+    return new SortNode(currentStageId, node.getCollation().getFieldCollations(), fetch, offset,
+        toDataSchema(node.getRowType()));
+  }
+
+  private static StageNode convertLogicalAggregate(LogicalAggregate node, int currentStageId) {
+    return new AggregateNode(currentStageId, toDataSchema(node.getRowType()), node.getAggCallList(),
+        node.getGroupSet());
+  }
+
   private static StageNode convertLogicalProject(LogicalProject node, int currentStageId) {
-    return new ProjectNode(currentStageId, node.getProjects());
+    return new ProjectNode(currentStageId, toDataSchema(node.getRowType()), node.getProjects());
   }
 
   private static StageNode convertLogicalFilter(LogicalFilter node, int currentStageId) {
-    return new FilterNode(currentStageId, node.getCondition());
+    return new FilterNode(currentStageId, toDataSchema(node.getRowType()), node.getCondition());
   }
 
   private static StageNode convertLogicalTableScan(LogicalTableScan node, int currentStageId) {
     String tableName = node.getTable().getQualifiedName().get(0);
-    List<String> columnNames = node.getRowType().getFieldList().stream()
-        .map(RelDataTypeField::getName).collect(Collectors.toList());
-    return new TableScanNode(currentStageId, tableName, columnNames);
+    List<String> columnNames =
+        node.getRowType().getFieldList().stream().map(RelDataTypeField::getName).collect(Collectors.toList());
+    return new TableScanNode(currentStageId, toDataSchema(node.getRowType()), tableName, columnNames);
   }
 
   private static StageNode convertLogicalJoin(LogicalJoin node, int currentStageId) {
     JoinRelType joinType = node.getJoinType();
+    Preconditions.checkState(node.getCondition() instanceof RexCall);
     RexCall joinCondition = (RexCall) node.getCondition();
-    Preconditions.checkState(
-        joinCondition.getOperator().getKind().equals(SqlKind.EQUALS) && joinCondition.getOperands().size() == 2,
-        "only equality JOIN is supported");
-    Preconditions.checkState(joinCondition.getOperands().get(0) instanceof RexInputRef, "only reference supported");
-    Preconditions.checkState(joinCondition.getOperands().get(1) instanceof RexInputRef, "only reference supported");
-    RelDataType leftRowType = node.getLeft().getRowType();
-    RelDataType rightRowType = node.getRight().getRowType();
-    int leftOperandIndex = ((RexInputRef) joinCondition.getOperands().get(0)).getIndex();
-    int rightOperandIndex = ((RexInputRef) joinCondition.getOperands().get(1)).getIndex();
-    FieldSelectionKeySelector leftFieldSelectionKeySelector = new FieldSelectionKeySelector(leftOperandIndex);
-    FieldSelectionKeySelector rightFieldSelectionKeySelector =
-          new FieldSelectionKeySelector(rightOperandIndex - leftRowType.getFieldNames().size());
-    return new JoinNode(currentStageId, joinType, Collections.singletonList(new JoinNode.JoinClause(
-        leftFieldSelectionKeySelector, rightFieldSelectionKeySelector)));
+
+    // Parse out all equality JOIN conditions
+    JoinInfo joinInfo = node.analyzeCondition();
+    FieldSelectionKeySelector leftFieldSelectionKeySelector = new FieldSelectionKeySelector(joinInfo.leftKeys);
+    FieldSelectionKeySelector rightFieldSelectionKeySelector = new FieldSelectionKeySelector(joinInfo.rightKeys);
+    Preconditions.checkState(joinInfo.nonEquiConditions.isEmpty());
+    return new JoinNode(currentStageId, toDataSchema(node.getRowType()), joinType, Collections.singletonList(
+        new JoinNode.JoinClause(leftFieldSelectionKeySelector, rightFieldSelectionKeySelector)));
+  }
+
+  private static DataSchema toDataSchema(RelDataType rowType) {
+    if (rowType instanceof RelRecordType) {
+      RelRecordType recordType = (RelRecordType) rowType;
+      String[] columnNames = recordType.getFieldNames().toArray(new String[]{});
+      DataSchema.ColumnDataType[] columnDataTypes = new DataSchema.ColumnDataType[columnNames.length];
+      for (int i = 0; i < columnNames.length; i++) {
+        columnDataTypes[i] = convertColumnDataType(recordType.getFieldList().get(i));
+      }
+      return new DataSchema(columnNames, columnDataTypes);
+    } else {
+      throw new IllegalArgumentException("Unsupported RelDataType: " + rowType);
+    }
+  }
+
+  private static DataSchema.ColumnDataType convertColumnDataType(RelDataTypeField relDataTypeField) {
+    switch (relDataTypeField.getType().getSqlTypeName()) {
+      case BOOLEAN:
+        return DataSchema.ColumnDataType.BOOLEAN;
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+        return DataSchema.ColumnDataType.INT;
+      case BIGINT:
+        return DataSchema.ColumnDataType.LONG;
+      case DECIMAL:
+        return DataSchema.ColumnDataType.BIG_DECIMAL;
+      case FLOAT:
+        return DataSchema.ColumnDataType.FLOAT;
+      case REAL:
+      case DOUBLE:
+        return DataSchema.ColumnDataType.DOUBLE;
+      case DATE:
+      case TIME:
+      case TIMESTAMP:
+        return DataSchema.ColumnDataType.TIMESTAMP;
+      case VARCHAR:
+        return DataSchema.ColumnDataType.STRING;
+      case BINARY:
+      case VARBINARY:
+        return DataSchema.ColumnDataType.BYTES;
+      default:
+        throw new IllegalStateException("Unexpected RelDataTypeField: " + relDataTypeField.getType());
+    }
   }
 }

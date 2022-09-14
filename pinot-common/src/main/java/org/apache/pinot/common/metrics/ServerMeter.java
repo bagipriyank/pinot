@@ -41,7 +41,9 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   REALTIME_OFFSET_COMMIT_EXCEPTIONS("exceptions", false),
   REALTIME_PARTITION_MISMATCH("mismatch", false),
   REALTIME_DEDUP_DROPPED("rows", false),
+  UPSERT_KEYS_IN_WRONG_SEGMENT("rows", false),
   PARTIAL_UPSERT_OUT_OF_ORDER("rows", false),
+  PARTIAL_UPSERT_KEYS_NOT_REPLACED("rows", false),
   ROWS_WITH_ERRORS("rows", false),
   LLC_CONTROLLER_RESPONSE_NOT_SENT("messages", true),
   LLC_CONTROLLER_RESPONSE_COMMIT("messages", true),
@@ -72,10 +74,17 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   NO_TABLE_ACCESS("tables", true),
   INDEXING_FAILURES("attributeValues", true),
 
+  READINESS_CHECK_OK_CALLS("readinessCheck", true),
+  READINESS_CHECK_BAD_CALLS("readinessCheck", true),
+
   // Netty connection metrics
   NETTY_CONNECTION_BYTES_RECEIVED("nettyConnection", true),
   NETTY_CONNECTION_RESPONSES_SENT("nettyConnection", true),
-  NETTY_CONNECTION_BYTES_SENT("nettyConnection", true);
+  NETTY_CONNECTION_BYTES_SENT("nettyConnection", true),
+
+  NUM_SEGMENTS_PRUNED_INVALID("numSegmentsPrunedInvalid", false),
+  NUM_SEGMENTS_PRUNED_BY_LIMIT("numSegmentsPrunedByLimit", false),
+  NUM_SEGMENTS_PRUNED_BY_VALUE("numSegmentsPrunedByValue", false),;
 
   private final String _meterName;
   private final String _unit;
